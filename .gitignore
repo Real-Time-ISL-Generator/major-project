@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.env.local
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+backend/downloads/*
+!backend/downloads/.gitkeep
+
+isl-web-app/node_modules/
+isl-web-app/dist/
+isl-web-app/coverage/
+isl-web-app/.vite/
+isl-web-app/*.tsbuildinfo
