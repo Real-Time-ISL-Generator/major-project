@@ -1,22 +1,20 @@
-import { useRef, useState } from 'react';
+import {useRef, useState} from 'react';
 
 type Props = {
   onSubmit: (submission: {
     text: string;
     videoUrl: string;
     fileContent: string;
-    fileType: 'vtt' | 'srt' | null;
   }) => Promise<void>;
   onClear: () => void;
 };
 
-export function TextInputPanel({ onSubmit, onClear }: Props) {
+export function TextInputPanel({onSubmit, onClear}: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [text, setText] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
   const [fileName, setFileName] = useState('');
   const [fileContent, setFileContent] = useState('');
-  const [fileType, setFileType] = useState<'vtt' | 'srt' | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async () => {
@@ -33,7 +31,6 @@ export function TextInputPanel({ onSubmit, onClear }: Props) {
         text: text.trim(),
         videoUrl: videoUrl.trim(),
         fileContent,
-        fileType,
       });
     } catch (err) {
       console.error(err);
@@ -49,11 +46,9 @@ export function TextInputPanel({ onSubmit, onClear }: Props) {
     if (!file) return;
 
     const content = await file.text();
-    const lowerName = file.name.toLowerCase();
 
     setFileName(file.name);
     setFileContent(content);
-    setFileType(lowerName.endsWith('.vtt') ? 'vtt' : 'srt');
   };
 
   const handleClear = () => {
@@ -61,7 +56,6 @@ export function TextInputPanel({ onSubmit, onClear }: Props) {
     setVideoUrl('');
     setFileName('');
     setFileContent('');
-    setFileType(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
