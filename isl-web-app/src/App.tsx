@@ -586,29 +586,38 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="topbar">
+      <section className="composer-shell">
         <div className="topbar-controls">
           <TextInputPanel onSubmit={handleSubmit} onClear={handleClear} />
         </div>
-      </header>
+      </section>
 
       <main
         className={
           videoId
-            ? 'translation-grid translation-grid-single-screen'
-            : 'translation-grid translation-grid-single-screen translation-grid-no-video'
+            ? 'translation-grid'
+            : 'translation-grid translation-grid-no-video'
         }
       >
         {videoId ? (
           <section className="panel panel-video" aria-label="Video preview panel">
-            <div className="video-frame">
-              <div id="player" className="yt-player" />
+            <div className="panel-section-header">
+              <div className="panel-section-copy">
+                <p className="panel-section-label">Source video (from YouTube)</p>
+              </div>
+            </div>
+
+            <div className="video-stage">
+              <div className="video-frame">
+                <div id="player" className="yt-player" />
+              </div>
             </div>
           </section>
         ) : null}
 
         <SkeletonViewerPanel
           activeIndex={activeIndex}
+          allowTranscriptToggle={Boolean(videoId)}
           chunks={chunks}
           error={appError}
           onVisibleViewerEnded={handleVisibleViewerEnded}

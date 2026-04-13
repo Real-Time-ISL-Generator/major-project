@@ -1,4 +1,4 @@
-import {act, fireEvent, render, screen, waitFor, within} from '@testing-library/react';
+import {act, fireEvent, render, screen, waitFor} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import App from './App';
@@ -29,6 +29,8 @@ describe('App', () => {
 
   beforeEach(() => {
     players = [];
+    window.localStorage.clear();
+    document.documentElement.dataset.theme = 'light';
     vi.stubGlobal('alert', vi.fn());
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
       window.setTimeout(() => callback(performance.now()), 16)
@@ -71,16 +73,34 @@ describe('App', () => {
   it('renders the current input shell and transcript panel', async () => {
     render(<App />);
 
-    expect(screen.getByPlaceholderText(/type text to sign/i)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/paste youtube link/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/enter a youtube url/i)).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/enter text for translation/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', {name: /youtube url/i})).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', {name: /text/i})).toBeInTheDocument();
+    expect(screen.getByRole('tab', {name: /subtitle file/i})).toBeInTheDocument();
     expect(screen.getByRole('button', {name: /submit/i})).toBeInTheDocument();
     expect(screen.getByLabelText(/stick figure output panel/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/transcript chunks/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/video preview panel/i)).not.toBeInTheDocument();
 
     await waitFor(() => {
-      expect(screen.getByText(/your chunked transcript will appear here/i)).toBeInTheDocument();
+      expect(screen.getByText('Avatar Preview')).toBeInTheDocument();
     });
+  });
+
+  it('opens the workspace menu and toggles the theme', async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    expect(document.documentElement.dataset.theme).toBe('light');
+
+    await user.click(screen.getByRole('button', {name: /open workspace menu/i}));
+    expect(screen.getByRole('menu', {name: /workspace menu/i})).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', {name: /toggle theme/i})).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', {name: /our team/i})).toBeDisabled();
+
+    await user.click(screen.getByRole('menuitem', {name: /toggle theme/i}));
+    expect(document.documentElement.dataset.theme).toBe('dark');
   });
 
   it('routes manual text into a single visible playback chunk without showing the video panel', async () => {
@@ -88,7 +108,8 @@ describe('App', () => {
 
     render(<App />);
 
-    await user.type(screen.getByPlaceholderText(/type text to sign/i), 'Hello world');
+    await user.click(screen.getByRole('tab', {name: /text/i}));
+    await user.type(screen.getByPlaceholderText(/enter text for translation/i), 'Hello world');
     await user.click(screen.getByRole('button', {name: /submit/i}));
 
     await waitFor(() => {
@@ -98,10 +119,8 @@ describe('App', () => {
     });
 
     expect(screen.queryByLabelText(/video preview panel/i)).not.toBeInTheDocument();
-    expect(screen.getByText('Chunk playback', {selector: 'strong'})).toBeInTheDocument();
-    expect(
-      within(screen.getByLabelText(/transcript chunks/i)).getByText('Hello world')
-    ).toBeInTheDocument();
+    expect(screen.getByText('Avatar Preview')).toBeInTheDocument();
+    expect(screen.queryByRole('button', {name: /show chunks/i})).not.toBeInTheDocument();
   });
 
   it('loads each youtube chunk through the same visible-viewer path', async () => {
@@ -143,7 +162,7 @@ Chunk two starts later
 
     render(<App />);
 
-    fireEvent.change(screen.getByPlaceholderText(/paste youtube link/i), {
+    fireEvent.change(screen.getByPlaceholderText(/enter a youtube url/i), {
       target: {value: 'https://www.youtube.com/watch?v=abc123'},
     });
     fireEvent.click(screen.getByRole('button', {name: /submit/i}));
@@ -162,9 +181,9 @@ Chunk two starts later
     await advance(22);
     expect(players[0]?.seekTo).toHaveBeenCalledWith(0, true);
 
-    expect(within(screen.getByLabelText(/transcript chunks/i)).getByText(/2 chunks/i)).toBeInTheDocument();
-    expect(screen.getByText('This is chunk one.')).toBeInTheDocument();
-    expect(screen.getByText('Chunk two starts later')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', {name: /show chunks/i}));
+    expect(screen.queryByLabelText(/transcript chunks/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/current chunk text/i)).toHaveTextContent('This is chunk one.');
 
     await advance(110);
     expect(players[0]?.pauseVideo).toHaveBeenCalled();
@@ -182,8 +201,12 @@ Chunk two starts later
     );
     expect(forcedPauseSeekIndex).toBeGreaterThan(-1);
 
+    await flushPromises();
+    await advance(30);
+
     const reboundViewer = document.querySelector('pose-viewer[data-role="visible"]');
     expect(reboundViewer?.getAttribute('src')).toContain('Chunk+two+starts+later');
+    expect(screen.getByLabelText(/current chunk text/i)).toHaveTextContent('Chunk two starts later');
 
     expect(fetchMock).toHaveBeenCalled();
   });
@@ -266,7 +289,7 @@ Chunk two starts here
 
     render(<App />);
 
-    fireEvent.change(screen.getByPlaceholderText(/paste youtube link/i), {
+    fireEvent.change(screen.getByPlaceholderText(/enter a youtube url/i), {
       target: {value: 'https://www.youtube.com/watch?v=short123'},
     });
     fireEvent.click(screen.getByRole('button', {name: /submit/i}));
@@ -280,5 +303,49 @@ Chunk two starts here
     expect(players[0]?.seekTo).not.toHaveBeenCalledWith(0.35, true);
     expect(players[0]?.currentTime).toBeLessThan(0.35);
     expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('submits only the active mode even when another mode has a draft value', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes('/download?url=')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            video_id: 'mode123',
+            subtitle_url: '/downloads/mode.en.srt',
+          }),
+        } as Response);
+      }
+
+      if (url.includes('/downloads/mode.en.srt')) {
+        return Promise.resolve({
+          ok: true,
+          text: async () => `1
+00:00:00,000 --> 00:00:01,000
+Mode switched correctly
+`,
+        } as Response);
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch url: ${url}`));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    await user.click(screen.getByRole('tab', {name: /text/i}));
+    await user.type(screen.getByPlaceholderText(/enter text for translation/i), 'Draft text');
+    await user.click(screen.getByRole('tab', {name: /youtube url/i}));
+    await user.type(screen.getByPlaceholderText(/enter a youtube url/i), 'https://www.youtube.com/watch?v=mode123');
+    await user.click(screen.getByRole('button', {name: /submit/i}));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    expect(String(fetchMock.mock.calls[0]?.[0] ?? '')).toContain('/download?url=');
+    expect(screen.getByLabelText(/video preview panel/i)).toBeInTheDocument();
   });
 });
