@@ -94,6 +94,15 @@ cd C:\path\to\Project\backend
 uvicorn server:app --reload --host 127.0.0.1 --port 8000
 ```
 
+Optional YouTube auth fallback configuration:
+
+```bash
+export YTDLP_COOKIE_FILE=/absolute/path/to/cookies.txt
+export YTDLP_COOKIE_BROWSER=safari
+export YTDLP_COOKIE_BROWSERS=safari,chrome,firefox
+export YTDLP_COOKIE_PROFILE=Default
+```
+
 Useful backend URLs:
 
 - Health check: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
@@ -170,6 +179,17 @@ Check:
 ### YouTube subtitles are not found
 
 The backend currently requests English subtitles only. Some videos do not provide English subtitles or auto-generated captions in a format `yt-dlp` can fetch.
+
+### YouTube says `Sign in to confirm you're not a bot`
+
+The backend first tries plain `yt-dlp`. If YouTube returns the bot-check/auth message, the backend retries with cookie-backed auth using:
+
+- `YTDLP_COOKIE_FILE`
+- `YTDLP_COOKIE_BROWSER`
+- `YTDLP_COOKIE_BROWSERS`
+- `YTDLP_COOKIE_PROFILE`
+
+On macOS, Safari is preferred first by default. After changing any of these variables, restart the backend.
 
 ## Project Structure
 
