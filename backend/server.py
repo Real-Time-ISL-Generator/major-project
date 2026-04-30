@@ -2,9 +2,10 @@ import logging
 import os
 from pathlib import Path
 import sys
+from typing import Any
 
 import certifi
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uuid
@@ -34,6 +35,17 @@ app.mount("/downloads", StaticFiles(directory=str(DOWNLOAD_PATH)), name="downloa
 
 MACOS_DEFAULT_COOKIE_BROWSERS = ("safari", "chrome", "brave", "chromium", "edge", "firefox")
 DEFAULT_COOKIE_BROWSERS = ("chrome", "edge", "brave", "chromium", "firefox")
+
+
+class SpeechSessionState:
+    def __init__(self) -> None:
+        self.session_id = str(uuid.uuid4())
+        self.sequence_id = 0
+        self.started = False
+
+    def next_sequence_id(self) -> int:
+        self.sequence_id += 1
+        return self.sequence_id
 
 
 def get_video_id(url: str) -> str | None:
@@ -254,3 +266,95 @@ def download_subtitle(url: str = Query(..., min_length=1)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+def build_transcript_event(
+    session: SpeechSessionState,
+    transcript_type: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    event_type = "transcript_final" if transcript_type == "final" else "transcript_interim"
+    text = str(payload.get("text", "")).strip()
+    confidence = payload.get("confidence")
+    created_at_ms = int(payload.get("created_at_ms") or 0)
+    speech_start_ms = payload.get("speech_start_ms")
+    speech_end_ms = payload.get("speech_end_ms")
+
+    return {
+        "type": event_type,
+        "session_id": session.session_id,
+        "sequence_id": session.next_sequence_id(),
+        "text": text,
+        "confidence": confidence if isinstance(confidence, (float, int)) else None,
+        "created_at_ms": created_at_ms,
+        "speech_start_ms": speech_start_ms if isinstance(speech_start_ms, (float, int)) else None,
+        "speech_end_ms": speech_end_ms if isinstance(speech_end_ms, (float, int)) else None,
+    }
+
+
+async def send_socket_error(websocket: WebSocket, detail: str) -> None:
+    await websocket.send_json({"type": "error", "detail": detail})
+
+
+@app.websocket("/speech/stream")
+async def speech_stream(websocket: WebSocket):
+    await websocket.accept()
+    session = SpeechSessionState()
+
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            message_type = str(payload.get("type", "")).strip()
+
+            if message_type == "start_session":
+                session.started = True
+                await websocket.send_json(
+                    {
+                        "type": "session_started",
+                        "session_id": session.session_id,
+                        "mode": "browser_fallback",
+                        "requires_client_transcripts": True,
+                    }
+                )
+                continue
+
+            if not session.started:
+                await send_socket_error(websocket, "Send start_session before streaming audio or transcript events.")
+                continue
+
+            if message_type == "audio_chunk":
+                await websocket.send_json({"type": "vad_state", "state": "listening"})
+                continue
+
+            if message_type == "vad_state":
+                state = str(payload.get("state", "listening")).strip().lower()
+                if state not in {"listening", "speaking", "processing"}:
+                    await send_socket_error(websocket, "Unsupported vad_state value.")
+                    continue
+
+                await websocket.send_json({"type": "vad_state", "state": state})
+                continue
+
+            if message_type == "client_transcript":
+                transcript_type = str(payload.get("transcript_state", "interim")).strip().lower()
+                if transcript_type not in {"interim", "final"}:
+                    await send_socket_error(websocket, "Unsupported transcript_state value.")
+                    continue
+
+                if not str(payload.get("text", "")).strip():
+                    await send_socket_error(websocket, "Transcript text is required.")
+                    continue
+
+                await websocket.send_json(build_transcript_event(session, transcript_type, payload))
+
+                if transcript_type == "final":
+                    await websocket.send_json({"type": "vad_state", "state": "processing"})
+                continue
+
+            if message_type == "end_session":
+                await websocket.send_json({"type": "session_ended", "session_id": session.session_id})
+                break
+
+            await send_socket_error(websocket, f"Unsupported speech session message type: {message_type}")
+    except WebSocketDisconnect:
+        logger.info("Speech websocket disconnected: %s", session.session_id)

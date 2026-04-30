@@ -11,3 +11,8 @@ export function buildBackendUrl(path: string): string {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   return `${getBackendBaseUrl()}${normalizedPath}`;
 }
+
+export function buildBackendWsUrl(path: string): string {
+  const httpUrl = buildBackendUrl(path);
+  return httpUrl.replace(/^http/i, 'ws');
+}

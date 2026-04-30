@@ -1,4 +1,4 @@
-import {act, fireEvent, render, screen, waitFor} from '@testing-library/react';
+import {act, fireEvent, render, screen, waitFor, within} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import App from './App';
@@ -78,6 +78,7 @@ describe('App', () => {
     expect(screen.getByRole('tab', {name: /youtube url/i})).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tab', {name: /text/i})).toBeInTheDocument();
     expect(screen.getByRole('tab', {name: /subtitle file/i})).toBeInTheDocument();
+    expect(screen.getByRole('tab', {name: /video mode/i})).toBeInTheDocument();
     expect(screen.getByRole('button', {name: /submit/i})).toBeInTheDocument();
     expect(screen.getByLabelText(/stick figure output panel/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/video preview panel/i)).not.toBeInTheDocument();
@@ -121,6 +122,180 @@ describe('App', () => {
     expect(screen.queryByLabelText(/video preview panel/i)).not.toBeInTheDocument();
     expect(screen.getByText('Avatar Preview')).toBeInTheDocument();
     expect(screen.queryByRole('button', {name: /show chunks/i})).not.toBeInTheDocument();
+  });
+
+  it('starts a live video session and routes finalized speech into the signer queue', async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole('tab', {name: /video mode/i}));
+    expect(screen.getByText(/microphone drives signing/i)).toBeInTheDocument();
+    expect(screen.queryByText(/configure permissions and start the live session below/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', {name: /start live session/i}));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/video mode live session panel/i)).toBeInTheDocument();
+      expect(screen.getByText(/video-based sign translation/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', {name: /open session settings/i})).toBeInTheDocument();
+    });
+
+    const SpeechRecognitionMock = (window as unknown as {
+      SpeechRecognition: {
+        instances: Array<{
+          emitFinalResult: (transcript: string, confidence?: number) => void;
+          emitInterimResult: (transcript: string) => void;
+          emitSpeechEnd: () => void;
+          emitSpeechStart: () => void;
+        }>;
+      };
+    }).SpeechRecognition;
+    await waitFor(() => {
+      expect(SpeechRecognitionMock.instances.length).toBeGreaterThan(0);
+    });
+    const recognition = SpeechRecognitionMock.instances.at(-1);
+
+    act(() => {
+      recognition?.emitSpeechStart();
+      recognition?.emitInterimResult('hello');
+      recognition?.emitFinalResult('hello world');
+      recognition?.emitSpeechEnd();
+    });
+
+    await waitFor(() => {
+      const poseViewers = Array.from(document.querySelectorAll('pose-viewer'));
+      expect(poseViewers).toHaveLength(1);
+      expect(poseViewers[0]?.getAttribute('src')).toContain('text=hello+world');
+      expect(screen.queryByText(/latest final/i)).not.toBeInTheDocument();
+      expect(screen.getByText(/live phrase/i)).toBeInTheDocument();
+      expect(screen.getAllByText(/hello world/i).length).toBeGreaterThan(0);
+      expect(screen.queryByText(/live speech backend unavailable/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it('opens and closes session settings from the gear modal flow', async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole('tab', {name: /video mode/i}));
+    await user.click(screen.getByRole('button', {name: /open session settings/i}));
+
+    const dialog = await screen.findByRole('dialog', {name: /session settings/i});
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByText(/camera is only used for optional visual presence/i)).toBeInTheDocument();
+
+    fireEvent.click(dialog.parentElement as HTMLElement);
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', {name: /session settings/i})).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', {name: /open session settings/i}));
+    expect(await screen.findByRole('dialog', {name: /session settings/i})).toBeInTheDocument();
+
+    fireEvent.keyDown(document, {key: 'Escape'});
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', {name: /session settings/i})).not.toBeInTheDocument();
+    });
+  });
+
+  it('falls back to audio-only live mode when the camera stream is denied', async () => {
+    const user = userEvent.setup();
+    const getUserMediaMock = navigator.mediaDevices.getUserMedia as unknown as ReturnType<typeof vi.fn>;
+
+    getUserMediaMock.mockImplementationOnce(async () => {
+      throw new DOMException('Video denied', 'NotAllowedError');
+    });
+    getUserMediaMock.mockImplementationOnce(async () => {
+      const audioTrack = {
+        enabled: true,
+        kind: 'audio',
+        stop: vi.fn(),
+      };
+
+      return {
+        getAudioTracks: () => [audioTrack],
+        getTracks: () => [audioTrack],
+        getVideoTracks: () => [],
+      };
+    });
+
+    render(<App />);
+
+    await user.click(screen.getByRole('tab', {name: /video mode/i}));
+    await user.click(screen.getByRole('button', {name: /start live session/i}));
+
+    await waitFor(() => {
+      expect(screen.getByText(/microphone input continues normally even when the camera preview is off/i)).toBeInTheDocument();
+    });
+  });
+
+  it('restores the camera preview after toggling it off and back on', async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole('tab', {name: /video mode/i}));
+    await user.click(screen.getByRole('button', {name: /start live session/i}));
+
+    await waitFor(() => {
+      expect(document.querySelector('.live-preview-video')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', {name: /turn camera preview off/i}));
+    await waitFor(() => {
+      expect(screen.getByText(/camera preview off/i)).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', {name: /turn camera preview on/i}));
+    await waitFor(() => {
+      expect(document.querySelector('.live-preview-video')).toBeInTheDocument();
+    });
+  });
+
+  it('keeps the active live phrase visible while showing the queued next phrase separately', async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole('tab', {name: /video mode/i}));
+    await user.click(screen.getByRole('button', {name: /start live session/i}));
+
+    const SpeechRecognitionMock = (window as unknown as {
+      SpeechRecognition: {
+        instances: Array<{
+          emitFinalResult: (transcript: string, confidence?: number) => void;
+          emitSpeechEnd: () => void;
+          emitSpeechStart: () => void;
+        }>;
+      };
+    }).SpeechRecognition;
+
+    await waitFor(() => {
+      expect(SpeechRecognitionMock.instances.length).toBeGreaterThan(0);
+    });
+
+    const recognition = SpeechRecognitionMock.instances.at(-1);
+
+    act(() => {
+      recognition?.emitSpeechStart();
+      recognition?.emitFinalResult('first phrase');
+      recognition?.emitSpeechEnd();
+      recognition?.emitSpeechStart();
+      recognition?.emitFinalResult('second phrase');
+      recognition?.emitSpeechEnd();
+    });
+
+    await waitFor(() => {
+      const poseViewers = Array.from(document.querySelectorAll('pose-viewer'));
+      expect(poseViewers).toHaveLength(1);
+      expect(poseViewers[0]?.getAttribute('src')).toContain('text=first+phrase');
+    });
+
+    const liveStatus = screen.getByLabelText(/live signer status/i);
+    expect(within(liveStatus).getByText(/^first phrase$/i)).toBeInTheDocument();
+    expect(within(liveStatus).getByText(/next up: second phrase/i)).toBeInTheDocument();
   });
 
   it('loads each youtube chunk through the same visible-viewer path', async () => {
