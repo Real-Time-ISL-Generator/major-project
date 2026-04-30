@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 import server
 
@@ -168,6 +169,80 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(str(context.exception), "network exploded")
         self.assertEqual(len(created), 1)
+
+    def test_speech_socket_session_lifecycle(self):
+        client = TestClient(server.app)
+
+        with client.websocket_connect("/speech/stream") as websocket:
+            websocket.send_json({"type": "start_session", "preferred_mode": "browser_fallback"})
+            started = websocket.receive_json()
+
+            self.assertEqual(started["type"], "session_started")
+            self.assertEqual(started["mode"], "browser_fallback")
+            self.assertTrue(started["requires_client_transcripts"])
+
+            websocket.send_json({"type": "end_session"})
+            ended = websocket.receive_json()
+
+            self.assertEqual(ended["type"], "session_ended")
+            self.assertEqual(ended["session_id"], started["session_id"])
+
+    def test_speech_socket_normalizes_transcript_events_in_order(self):
+        client = TestClient(server.app)
+
+        with client.websocket_connect("/speech/stream") as websocket:
+            websocket.send_json({"type": "start_session"})
+            started = websocket.receive_json()
+
+            websocket.send_json(
+                {
+                    "type": "client_transcript",
+                    "transcript_state": "interim",
+                    "text": "hello there",
+                    "created_at_ms": 101,
+                    "speech_start_ms": 11,
+                }
+            )
+            interim = websocket.receive_json()
+
+            websocket.send_json(
+                {
+                    "type": "client_transcript",
+                    "transcript_state": "final",
+                    "text": "hello there friend",
+                    "confidence": 0.91,
+                    "created_at_ms": 202,
+                    "speech_start_ms": 11,
+                    "speech_end_ms": 99,
+                }
+            )
+            final_event = websocket.receive_json()
+            processing = websocket.receive_json()
+
+            self.assertEqual(interim["type"], "transcript_interim")
+            self.assertEqual(final_event["type"], "transcript_final")
+            self.assertEqual(interim["session_id"], started["session_id"])
+            self.assertEqual(final_event["session_id"], started["session_id"])
+            self.assertLess(interim["sequence_id"], final_event["sequence_id"])
+            self.assertEqual(final_event["confidence"], 0.91)
+            self.assertEqual(final_event["speech_end_ms"], 99)
+            self.assertEqual(processing, {"type": "vad_state", "state": "processing"})
+
+    def test_speech_socket_rejects_transcript_before_session_start(self):
+        client = TestClient(server.app)
+
+        with client.websocket_connect("/speech/stream") as websocket:
+            websocket.send_json(
+                {
+                    "type": "client_transcript",
+                    "transcript_state": "final",
+                    "text": "too early",
+                }
+            )
+            error_event = websocket.receive_json()
+
+            self.assertEqual(error_event["type"], "error")
+            self.assertIn("start_session", error_event["detail"])
 
 
 if __name__ == "__main__":

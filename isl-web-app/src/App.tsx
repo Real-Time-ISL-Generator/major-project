@@ -1,8 +1,14 @@
-import {useEffect, useRef, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import {SkeletonViewerPanel} from './components/SkeletonViewerPanel';
-import {TextInputPanel} from './components/TextInputPanel';
+import {TextInputPanel, type InputMode} from './components/TextInputPanel';
+import {
+  VideoModePanel,
+  type LiveTranscriptEvent,
+  type VideoModeSessionPhase,
+} from './components/VideoModePanel';
 import {buildBackendUrl} from './lib/backend';
 import {
+  createLivePlaybackChunk,
   createPlaybackChunks,
   createTextPlaybackChunks,
   type PlaybackChunk,
@@ -36,6 +42,7 @@ type YouTubePlayerHandle = {
   seekTo?: (seconds: number, allowSeekAhead?: boolean) => void;
 };
 
+const LIVE_QUEUE_LIMIT = 3;
 const VIDEO_END_TOLERANCE = 0.05;
 
 async function getResponseErrorMessage(response: Response, fallback: string): Promise<string> {
@@ -55,6 +62,7 @@ async function getResponseErrorMessage(response: Response, fallback: string): Pr
 }
 
 function App() {
+  const [activeMode, setActiveMode] = useState<InputMode>('youtube');
   const [chunks, setChunks] = useState<PlaybackChunk[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [visibleChunkIndex, setVisibleChunkIndex] = useState<number | null>(null);
@@ -69,6 +77,9 @@ function App() {
   const [appError, setAppError] = useState<string | null>(null);
   const [ytReady, setYtReady] = useState(false);
   const [runId, setRunId] = useState(0);
+  const [videoSessionActive, setVideoSessionActive] = useState(false);
+  const [videoSessionPhase, setVideoSessionPhase] = useState<VideoModeSessionPhase>('idle');
+  const [latestLivePhrase, setLatestLivePhrase] = useState('');
 
   const playerRef = useRef<YouTubePlayerHandle | null>(null);
   const visibleViewerRef = useRef<PoseViewerHandle | null>(null);
@@ -139,6 +150,60 @@ function App() {
       },
     });
   }, [videoId, ytReady]);
+
+  const liveQueueSummary = useMemo(() => {
+    const liveChunks = chunks.filter(chunk => chunk.sourceMode === 'video');
+    const queuedChunks = liveChunks.filter(chunk =>
+      chunk.queueStatus === 'pending' || chunk.queueStatus === 'ready' || chunk.queueStatus === 'playing'
+    );
+    const activeLiveChunk =
+      activeMode === 'video' &&
+      chunks[activeIndex]?.sourceMode === 'video' &&
+      chunks[activeIndex]?.queueStatus !== 'played' &&
+      chunks[activeIndex]?.queueStatus !== 'error'
+        ? chunks[activeIndex]
+        : null;
+    const nextQueuedChunk = activeLiveChunk
+      ? chunks.find(
+          (chunk, index) =>
+            index > activeIndex &&
+            chunk.sourceMode === 'video' &&
+            (chunk.queueStatus === 'pending' || chunk.queueStatus === 'ready')
+        ) ?? null
+      : queuedChunks.find(chunk => chunk.queueStatus === 'pending' || chunk.queueStatus === 'ready') ?? null;
+
+    return {
+      currentText: activeLiveChunk?.text?.trim() || latestLivePhrase.trim(),
+      isLagging: queuedChunks.length > LIVE_QUEUE_LIMIT - 1,
+      nextQueuedText: nextQueuedChunk?.text ?? null,
+      queuedCount: queuedChunks.length,
+    };
+  }, [activeIndex, activeMode, chunks, latestLivePhrase]);
+
+  const viewerStatusLabel = useMemo(() => {
+    if (activeMode !== 'video') {
+      return null;
+    }
+    if (playbackState === 'playing') {
+      return liveQueueSummary.isLagging ? 'Signing and catching up' : 'Signing now';
+    }
+    switch (videoSessionPhase) {
+      case 'connecting':
+        return 'Connecting live speech';
+      case 'testing':
+        return 'Testing devices';
+      case 'processing':
+        return 'Processing phrase';
+      case 'listening':
+        return 'Listening for speech';
+      case 'unsupported':
+        return 'Browser support needed';
+      case 'error':
+        return 'Session needs attention';
+      default:
+        return 'Live signer ready';
+    }
+  }, [activeMode, liveQueueSummary.isLagging, playbackState, videoSessionPhase]);
 
   function cancelVideoMonitor() {
     if (videoMonitorRef.current !== null) {
@@ -219,6 +284,7 @@ function App() {
         ...chunk,
         poseDuration:
           chunkIndex === index && Number.isFinite(duration) && duration > 0 ? duration : chunk.poseDuration,
+        queueStatus: chunkIndex === index && chunk.queueStatus === 'pending' ? 'ready' : chunk.queueStatus,
         visibleStatus: chunkIndex === index ? 'ready' : 'idle',
       }))
     );
@@ -228,6 +294,7 @@ function App() {
     updateChunk(index, chunk => ({
       ...chunk,
       error: message,
+      queueStatus: 'error',
     }));
   }
 
@@ -241,6 +308,12 @@ function App() {
     visibleChunkIndexRef.current = index;
     setVisiblePoseSrc(chunk.poseUrl);
     markChunkVisibleBinding(index);
+  }
+
+  function resetLiveModeState() {
+    setVideoSessionActive(false);
+    setVideoSessionPhase('idle');
+    setLatestLivePhrase('');
   }
 
   function resetSession(nextState: PlaybackState = 'idle') {
@@ -279,6 +352,7 @@ function App() {
 
   async function handleSubmit({text, videoUrl, fileContent}: SubmissionPayload) {
     resetSession('loadingSource');
+
     const sessionId = submissionRef.current;
 
     try {
@@ -327,7 +401,7 @@ function App() {
         setPlaybackState('chunking');
         const cues = parseSubtitleCues(subtitleText);
         const mergedChunks = mergeSubtitleCues(cues);
-        const playbackChunks = createPlaybackChunks(mergedChunks);
+        const playbackChunks = createPlaybackChunks(mergedChunks, 'youtube');
 
         if (playbackChunks.length === 0) {
           throw new Error('Subtitle file was empty or could not be parsed.');
@@ -341,7 +415,7 @@ function App() {
         setPlaybackState('chunking');
         const cues = parseSubtitleCues(fileContent);
         const mergedChunks = mergeSubtitleCues(cues);
-        const playbackChunks = createPlaybackChunks(mergedChunks);
+        const playbackChunks = createPlaybackChunks(mergedChunks, 'file');
 
         if (playbackChunks.length === 0) {
           throw new Error('Subtitle file was empty or could not be parsed.');
@@ -378,6 +452,16 @@ function App() {
     resetSession('idle');
   }
 
+  function handleModeChange(nextMode: InputMode) {
+    if (nextMode === activeMode) {
+      return;
+    }
+
+    setActiveMode(nextMode);
+    resetSession('idle');
+    resetLiveModeState();
+  }
+
   function handleVisibleViewerRef(node: HTMLElement | null) {
     visibleViewerRef.current = node as PoseViewerHandle | null;
   }
@@ -399,8 +483,18 @@ function App() {
 
   function handleVisibleViewerError(message: string) {
     const index = visibleChunkIndexRef.current;
+    const chunk = index !== null ? chunksRef.current[index] : null;
+
     if (index !== null) {
       markChunkError(index, message);
+    }
+
+    if (chunk?.sourceMode === 'video') {
+      setSegmentProgress({
+        videoDone: true,
+        poseDone: true,
+      });
+      return;
     }
 
     setAppError(message);
@@ -485,6 +579,10 @@ function App() {
     }
 
     await stopRuntime();
+    updateChunk(activeIndexRef.current, chunk => ({
+      ...chunk,
+      queueStatus: 'playing',
+    }));
     setPlaybackState('playing');
     setSegmentProgress({
       videoDone: false,
@@ -564,15 +662,46 @@ function App() {
       return;
     }
 
-    const nextIndex = activeIndex + 1;
-    const nextChunk = chunks[nextIndex];
-    if (!nextChunk) {
-      setPlaybackState('completed');
+    updateChunk(activeIndex, chunk => ({
+      ...chunk,
+      queueStatus: chunk.queueStatus === 'error' ? 'error' : 'played',
+    }));
+
+    const nextIndex = chunks.findIndex(
+      (chunk, index) =>
+        index > activeIndex && chunk.queueStatus !== 'played' && chunk.queueStatus !== 'error'
+    );
+
+    if (nextIndex === -1) {
+      setPlaybackState(videoSessionActive && activeMode === 'video' ? 'idle' : 'completed');
       return;
     }
 
     transitionToChunk(nextIndex);
-  }, [activeIndex, chunks, segmentProgress]);
+  }, [activeIndex, activeMode, chunks, segmentProgress, videoSessionActive]);
+
+  useEffect(() => {
+    if (activeMode !== 'video' || !videoSessionActive) {
+      return;
+    }
+
+    if (
+      playbackState === 'playing' ||
+      playbackState === 'ready' ||
+      playbackState === 'bindingVisibleChunk' ||
+      playbackState === 'preparingInitialChunks'
+    ) {
+      return;
+    }
+
+    const nextIndex = chunks.findIndex(
+      chunk => chunk.sourceMode === 'video' && chunk.queueStatus !== 'played' && chunk.queueStatus !== 'error'
+    );
+
+    if (nextIndex !== -1) {
+      transitionToChunk(nextIndex);
+    }
+  }, [activeMode, chunks, playbackState, videoSessionActive]);
 
   useEffect(() => {
     return () => {
@@ -584,22 +713,99 @@ function App() {
     };
   }, []);
 
+  function handleLiveTranscriptEvent(event: LiveTranscriptEvent) {
+    if (event.transcriptState !== 'final' || !event.text.trim()) {
+      return;
+    }
+
+    setLatestLivePhrase(event.text.trim());
+    setAppError(null);
+
+    updateChunks(prevChunks => {
+      if (prevChunks.some(chunk => chunk.id === event.id)) {
+        return prevChunks;
+      }
+
+      const nextChunks = [...prevChunks];
+      const queuedLiveIndexes = nextChunks
+        .map((chunk, index) =>
+          chunk.sourceMode === 'video' &&
+          chunk.queueStatus !== 'played' &&
+          chunk.queueStatus !== 'error' &&
+          chunk.queueStatus !== 'playing'
+            ? index
+            : -1
+        )
+        .filter(index => index >= 0);
+
+      if (queuedLiveIndexes.length >= LIVE_QUEUE_LIMIT) {
+        const mergeIndex = queuedLiveIndexes[queuedLiveIndexes.length - 1];
+        const mergeTarget = nextChunks[mergeIndex];
+
+        nextChunks[mergeIndex] = createLivePlaybackChunk({
+          id: mergeTarget.id,
+          text: `${mergeTarget.text} ${event.text}`,
+          createdAtMs: event.createdAtMs,
+          speechStartMs: mergeTarget.speechStartMs,
+          speechEndMs: event.speechEndMs,
+        });
+
+        return nextChunks;
+      }
+
+      nextChunks.push(
+        createLivePlaybackChunk({
+          id: event.id,
+          text: event.text,
+          createdAtMs: event.createdAtMs,
+          speechStartMs: event.speechStartMs,
+          speechEndMs: event.speechEndMs,
+        })
+      );
+
+      return nextChunks;
+    });
+  }
+
   return (
     <div className="app-shell">
       <section className="composer-shell">
         <div className="topbar-controls">
-          <TextInputPanel onSubmit={handleSubmit} onClear={handleClear} />
+          <TextInputPanel
+            activeMode={activeMode}
+            onClear={handleClear}
+            onModeChange={handleModeChange}
+            onSubmit={handleSubmit}
+          />
         </div>
       </section>
 
       <main
         className={
-          videoId
-            ? 'translation-grid'
-            : 'translation-grid translation-grid-no-video'
+          activeMode === 'video'
+            ? 'translation-grid translation-grid-live'
+            : videoId
+              ? 'translation-grid'
+              : 'translation-grid translation-grid-no-video'
         }
       >
-        {videoId ? (
+        {activeMode === 'video' ? (
+          <VideoModePanel
+            isLagging={liveQueueSummary.isLagging}
+            latestSignedText={liveQueueSummary.currentText}
+            nextPhraseText={liveQueueSummary.nextQueuedText}
+            onSessionActiveChange={setVideoSessionActive}
+            onSessionPhaseChange={setVideoSessionPhase}
+            onSessionReset={() => {
+              resetSession('idle');
+              setLatestLivePhrase('');
+              setAppError(null);
+            }}
+            onTranscriptEvent={handleLiveTranscriptEvent}
+            playbackState={playbackState}
+            queuedPhraseCount={liveQueueSummary.queuedCount}
+          />
+        ) : videoId ? (
           <section className="panel panel-video" aria-label="Video preview panel">
             <div className="panel-section-header">
               <div className="panel-section-copy">
@@ -620,6 +826,11 @@ function App() {
           allowTranscriptToggle={Boolean(videoId)}
           chunks={chunks}
           error={appError}
+          liveMode={activeMode === 'video'}
+          liveQueuedCount={liveQueueSummary.queuedCount}
+          liveSignedText={liveQueueSummary.currentText}
+          liveStatusLabel={viewerStatusLabel}
+          nextQueuedText={liveQueueSummary.nextQueuedText}
           onVisibleViewerEnded={handleVisibleViewerEnded}
           onVisibleViewerError={handleVisibleViewerError}
           onVisibleViewerReady={handleVisibleViewerReady}

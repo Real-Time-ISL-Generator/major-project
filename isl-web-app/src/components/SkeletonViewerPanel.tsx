@@ -11,6 +11,12 @@ type SkeletonViewerPanelProps = {
   allowTranscriptToggle: boolean;
   chunks: PlaybackChunk[];
   error: string | null;
+  liveInterimText?: string;
+  liveMode?: boolean;
+  liveQueuedCount?: number;
+  liveSignedText?: string;
+  liveStatusLabel?: string | null;
+  nextQueuedText?: string | null;
   playbackState: PlaybackState;
   visibleChunkIndex: number | null;
   visiblePoseSrc: string | null;
@@ -52,6 +58,12 @@ export function SkeletonViewerPanel({
   allowTranscriptToggle,
   chunks,
   error,
+  liveInterimText = '',
+  liveMode = false,
+  liveQueuedCount = 0,
+  liveSignedText = '',
+  liveStatusLabel = null,
+  nextQueuedText = null,
   playbackState,
   visibleChunkIndex,
   visiblePoseSrc,
@@ -133,16 +145,25 @@ export function SkeletonViewerPanel({
   const activeChunk = chunks[activeIndex] ?? null;
   const statusOverlay = getStatusOverlay(playbackState);
   const showLoading = !viewerReady || statusOverlay !== null;
-  const isVideoBacked = allowTranscriptToggle;
+  const isVideoBacked = allowTranscriptToggle || liveMode;
   const showChunkToggle = allowTranscriptToggle && chunks.length > 0;
   const showChunkBubble = Boolean(
     allowTranscriptToggle && isTranscriptOpen && activeChunk?.text.trim()
   );
+  const showLiveBubble = liveMode && Boolean(liveSignedText || liveInterimText || nextQueuedText);
 
   return (
     <section className="panel panel-viewer" aria-label="Stick figure output panel">
       <div className="panel-section-header panel-section-header-viewer">
-        <p className="panel-section-label">Avatar Preview</p>
+        <div className="panel-section-copy">
+          <p className="panel-section-label">{liveMode ? 'Live signer' : 'Avatar Preview'}</p>
+          {liveStatusLabel ? <h2>{liveStatusLabel}</h2> : null}
+        </div>
+        {liveMode ? (
+          <div className="live-viewer-meta">
+            <span className="viewer-live-chip">{`Queue ${liveQueuedCount}`}</span>
+          </div>
+        ) : null}
       </div>
 
       <div className="viewer-stage">
@@ -218,6 +239,19 @@ export function SkeletonViewerPanel({
             <article className="viewer-chunk-bubble" aria-live="polite" aria-label="Current chunk text">
               <span className="viewer-chunk-eyebrow">{`Chunk ${activeIndex + 1}`}</span>
               <p>{activeChunk?.text}</p>
+            </article>
+          ) : null}
+
+          {showLiveBubble ? (
+            <article className="viewer-chunk-bubble viewer-live-bubble" aria-live="polite" aria-label="Live signer status">
+              <span className="viewer-chunk-eyebrow">Live phrase</span>
+              <p>{liveSignedText || liveInterimText || 'Listening for the next phrase.'}</p>
+              {liveInterimText && !liveSignedText ? (
+                <span className="viewer-live-note">Interim transcript</span>
+              ) : null}
+              {nextQueuedText ? (
+                <span className="viewer-live-note">{`Next up: ${nextQueuedText}`}</span>
+              ) : null}
             </article>
           ) : null}
 

@@ -1,6 +1,10 @@
 import {useEffect, useId, useRef, useState} from 'react';
 
+export type InputMode = 'youtube' | 'text' | 'file' | 'video';
+
 type Props = {
+  activeMode: InputMode;
+  onModeChange: (mode: InputMode) => void;
   onSubmit: (submission: {
     text: string;
     videoUrl: string;
@@ -9,18 +13,16 @@ type Props = {
   onClear: () => void;
 };
 
-type InputMode = 'youtube' | 'text' | 'file';
 type ThemeMode = 'light' | 'dark';
 
 function ActionIcon({children}: {children: React.ReactNode}) {
   return <span className="icon-button-glyph" aria-hidden="true">{children}</span>;
 }
 
-export function TextInputPanel({onSubmit, onClear}: Props) {
+export function TextInputPanel({activeMode, onModeChange, onSubmit, onClear}: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const fileInputId = useId();
-  const [activeMode, setActiveMode] = useState<InputMode>('youtube');
   const [text, setText] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
   const [fileName, setFileName] = useState('');
@@ -91,6 +93,12 @@ export function TextInputPanel({onSubmit, onClear}: Props) {
               videoUrl: '',
               fileContent,
             }
+          : activeMode === 'video'
+            ? {
+                text: '',
+                videoUrl: '',
+                fileContent: '',
+              }
           : {
               text: '',
               videoUrl: videoUrl.trim(),
@@ -153,6 +161,7 @@ export function TextInputPanel({onSubmit, onClear}: Props) {
               ['youtube', 'YouTube URL'],
               ['text', 'Text'],
               ['file', 'Subtitle File'],
+              ['video', 'Video Mode'],
             ] as const).map(([mode, label]) => {
               const isActive = activeMode === mode;
 
@@ -163,7 +172,7 @@ export function TextInputPanel({onSubmit, onClear}: Props) {
                   role="tab"
                   aria-selected={isActive}
                   className={isActive ? 'mode-button mode-button-active' : 'mode-button'}
-                  onClick={() => setActiveMode(mode)}
+                  onClick={() => onModeChange(mode)}
                 >
                   {label}
                 </button>
@@ -365,6 +374,21 @@ export function TextInputPanel({onSubmit, onClear}: Props) {
               accept=".srt,.vtt"
               onChange={handleFileUpload}
             />
+          </div>
+        ) : null}
+
+        {activeMode === 'video' ? (
+          <div className="input-card input-card-compact">
+            <div className="input-card-header">
+              <span className="field-label">Video mode session</span>
+              <span className="input-mode-note">Microphone drives signing. Camera stays optional for visual presence.</span>
+            </div>
+            <div className="video-mode-note-card">
+              <p className="field-helper">
+                Video Mode keeps a simple meeting-style preview beside the signer. Start from the live tile below, and
+                use the gear icon for microphone, camera, and device settings.
+              </p>
+            </div>
           </div>
         ) : null}
       </div>
