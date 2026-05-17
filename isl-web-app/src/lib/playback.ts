@@ -2,7 +2,7 @@ import {buildPoseUrl} from './translation';
 import type {RawSubtitleCue} from './subtitleParser';
 
 export type VisibleChunkStatus = 'idle' | 'binding' | 'ready';
-export type PlaybackSourceMode = 'youtube' | 'text' | 'file' | 'video';
+export type PlaybackSourceMode = 'youtube' | 'text' | 'file' | 'video' | 'groq';
 export type TranscriptState = 'interim' | 'final';
 export type QueueStatus = 'pending' | 'ready' | 'playing' | 'played' | 'error';
 
@@ -118,6 +118,25 @@ export function createTextPlaybackChunks(text: string): PlaybackChunk[] {
       },
     ],
     'text'
+  );
+}
+
+export function createGroqPlaybackChunks(text: string): PlaybackChunk[] {
+  const trimmedText = text.trim();
+  if (!trimmedText) {
+    return [];
+  }
+
+  const duration = Math.max(2, Math.min(5, Math.ceil(trimmedText.length / 16)));
+  return createPlaybackChunks(
+    [
+      {
+        start: 0,
+        end: duration,
+        text: trimmedText,
+      },
+    ],
+    'groq'
   );
 }
 

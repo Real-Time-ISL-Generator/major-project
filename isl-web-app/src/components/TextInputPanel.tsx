@@ -1,6 +1,6 @@
 import {useEffect, useId, useRef, useState} from 'react';
 
-export type InputMode = 'youtube' | 'text' | 'file' | 'video';
+export type InputMode = 'youtube' | 'text' | 'file' | 'video' | 'groq';
 
 type Props = {
   activeMode: InputMode;
@@ -9,6 +9,7 @@ type Props = {
     text: string;
     videoUrl: string;
     fileContent: string;
+    llmPrompt: string;
   }) => Promise<void>;
   onClear: () => void;
 };
@@ -25,6 +26,7 @@ export function TextInputPanel({activeMode, onModeChange, onSubmit, onClear}: Pr
   const fileInputId = useId();
   const [text, setText] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
+  const [groqPrompt, setGroqPrompt] = useState('');
   const [fileName, setFileName] = useState('');
   const [fileContent, setFileContent] = useState('');
   const [loading, setLoading] = useState(false);
@@ -86,26 +88,37 @@ export function TextInputPanel({activeMode, onModeChange, onSubmit, onClear}: Pr
             text: text.trim(),
             videoUrl: '',
             fileContent: '',
+            llmPrompt: '',
           }
+        : activeMode === 'groq'
+          ? {
+              text: '',
+              videoUrl: '',
+              fileContent: '',
+              llmPrompt: groqPrompt.trim(),
+            }
         : activeMode === 'file'
           ? {
               text: '',
               videoUrl: '',
               fileContent,
+              llmPrompt: '',
             }
           : activeMode === 'video'
             ? {
                 text: '',
                 videoUrl: '',
                 fileContent: '',
+                llmPrompt: '',
               }
           : {
               text: '',
               videoUrl: videoUrl.trim(),
               fileContent: '',
+              llmPrompt: '',
             };
 
-    if (!nextSubmission.text && !nextSubmission.videoUrl && !nextSubmission.fileContent) {
+    if (!nextSubmission.text && !nextSubmission.videoUrl && !nextSubmission.fileContent && !nextSubmission.llmPrompt) {
       alert('Add content to the active input mode before submitting.');
       return;
     }
@@ -135,6 +148,7 @@ export function TextInputPanel({activeMode, onModeChange, onSubmit, onClear}: Pr
   const handleClear = () => {
     setText('');
     setVideoUrl('');
+    setGroqPrompt('');
     setFileName('');
     setFileContent('');
     if (fileInputRef.current) {
@@ -160,6 +174,7 @@ export function TextInputPanel({activeMode, onModeChange, onSubmit, onClear}: Pr
             {([
               ['youtube', 'YouTube URL'],
               ['text', 'Text'],
+              ['groq', 'LLM Mode'],
               ['file', 'Subtitle File'],
               ['video', 'Video Mode'],
             ] as const).map(([mode, label]) => {
@@ -285,6 +300,59 @@ export function TextInputPanel({activeMode, onModeChange, onSubmit, onClear}: Pr
                   placeholder="Enter text for translation"
                   value={text}
                   onChange={(e) => setText(e.target.value)}
+                />
+              </div>
+              <div className="action-rail">
+                <button
+                  type="button"
+                  className="icon-button icon-button-primary"
+                  aria-label={loading ? 'Processing' : 'Submit'}
+                  onClick={handleSubmit}
+                  disabled={loading}
+                >
+                  <ActionIcon>
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M5 12h12" />
+                      <path d="M13 6l6 6-6 6" />
+                    </svg>
+                  </ActionIcon>
+                </button>
+                <button
+                  type="button"
+                  className="icon-button icon-button-secondary"
+                  aria-label="Clear"
+                  onClick={handleClear}
+                  disabled={loading}
+                >
+                  <ActionIcon>
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M6 6l12 12" />
+                      <path d="M18 6L6 18" />
+                    </svg>
+                  </ActionIcon>
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {activeMode === 'groq' ? (
+          <div className="input-card input-card-compact">
+            <div className="input-card-header">
+              <label className="field-label" htmlFor="groq-source">
+                Groq prompt
+              </label>
+              <span className="input-mode-note">Answers are shortened before signing.</span>
+            </div>
+            <div className="input-stage">
+              <div className="input-control-wrap">
+                <input
+                  id="groq-source"
+                  className="control-input control-input-fixed"
+                  type="text"
+                  placeholder="Ask Groq for a short answer"
+                  value={groqPrompt}
+                  onChange={(e) => setGroqPrompt(e.target.value)}
                 />
               </div>
               <div className="action-rail">

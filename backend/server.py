@@ -1,15 +1,20 @@
 import logging
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import certifi
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 import uuid
 from urllib.parse import urlparse, parse_qs
+import json
 
 import yt_dlp
 
@@ -35,6 +40,34 @@ app.mount("/downloads", StaticFiles(directory=str(DOWNLOAD_PATH)), name="downloa
 
 MACOS_DEFAULT_COOKIE_BROWSERS = ("safari", "chrome", "brave", "chromium", "edge", "firefox")
 DEFAULT_COOKIE_BROWSERS = ("chrome", "edge", "brave", "chromium", "firefox")
+GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_PROMPT_LIMIT = 800
+GROQ_ANSWER_WORD_LIMIT = 12
+
+
+class GroqPromptRequest(BaseModel):
+    prompt: str
+
+
+def load_local_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("\"'")
+
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_local_env_file(BACKEND_DIR / ".env")
 
 
 class SpeechSessionState:
@@ -236,9 +269,122 @@ def download_with_yt_dlp(url: str, unique_id: str) -> str:
         raise meaningful_error
 
 
+def normalize_groq_answer(answer: str) -> str:
+    normalized = re.sub(r"\s+", " ", answer).strip()
+    normalized = re.sub(r"^(?:[-*•]|\d+[.)])\s+", "", normalized)
+    normalized = normalized.strip(" \t\r\n\"'`*_")
+
+    words = normalized.split()
+    if len(words) > GROQ_ANSWER_WORD_LIMIT:
+        normalized = " ".join(words[:GROQ_ANSWER_WORD_LIMIT]).rstrip(".,;:!?")
+
+    return normalized
+
+
+def extract_groq_answer(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return ""
+
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        return ""
+
+    content = message.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def read_groq_error_body(error: HTTPError) -> str:
+    try:
+        return error.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def build_groq_http_error_detail(status_code: int) -> str:
+    if status_code in {401, 403}:
+        return "Groq rejected the API key or project permissions. Check the key in backend/.env."
+    if status_code == 429:
+        return "Groq rate limit reached. Please wait and try again."
+    return "Groq could not generate an answer right now."
+
+
+def call_groq_concise_answer(prompt: str) -> str:
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Groq API key is not configured. Set GROQ_API_KEY on the backend.",
+        )
+
+    payload = {
+        "model": GROQ_MODEL,
+        "temperature": 0.2,
+        "max_completion_tokens": 40,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Answer in one concise, signable English sentence. "
+                    "Use at most 12 words. Do not use markdown."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    request = Request(
+        GROQ_CHAT_COMPLETIONS_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "ISL-Translation-Studio/1.0",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=20) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        error_body = read_groq_error_body(error)
+        logger.warning("Groq request failed with HTTP status %s: %s", error.code, error_body)
+        raise HTTPException(status_code=502, detail=build_groq_http_error_detail(error.code)) from error
+    except (URLError, TimeoutError, json.JSONDecodeError) as error:
+        logger.warning("Groq request failed: %s", error)
+        raise HTTPException(status_code=502, detail="Groq could not generate an answer right now.") from error
+
+    answer = normalize_groq_answer(extract_groq_answer(response_payload))
+    if not answer:
+        raise HTTPException(status_code=502, detail="Groq returned an empty answer.")
+
+    return answer
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.post("/groq/concise-answer")
+def groq_concise_answer(request: GroqPromptRequest):
+    prompt = re.sub(r"\s+", " ", request.prompt).strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt text is required.")
+
+    if len(prompt) > GROQ_PROMPT_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Prompt is too long. Keep it under {GROQ_PROMPT_LIMIT} characters.",
+        )
+
+    return {"answer": call_groq_concise_answer(prompt)}
 
 
 @app.get("/download")

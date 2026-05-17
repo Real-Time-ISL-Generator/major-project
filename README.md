@@ -84,6 +84,7 @@ Start the backend:
 
 ```bash
 cd /path/to/Project/backend
+export GROQ_API_KEY=your_groq_api_key
 uvicorn server:app --reload --host 127.0.0.1 --port 8000
 ```
 
@@ -91,8 +92,11 @@ Windows PowerShell:
 
 ```powershell
 cd C:\path\to\Project\backend
+$env:GROQ_API_KEY="your_groq_api_key"
 uvicorn server:app --reload --host 127.0.0.1 --port 8000
 ```
+
+`GROQ_API_KEY` is required for LLM Mode. Keep the real key in your local shell or an ignored `.env` file; do not commit it.
 
 Optional YouTube auth fallback configuration:
 

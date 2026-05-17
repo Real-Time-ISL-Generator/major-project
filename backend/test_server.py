@@ -3,6 +3,8 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
+from io import BytesIO
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -37,6 +39,20 @@ class FakeYoutubeDL:
             action(self.opts)
         elif isinstance(action, Exception):
             raise action
+
+
+class FakeGroqResponse:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self.payload
 
 
 class ServerTests(unittest.TestCase):
@@ -169,6 +185,91 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(str(context.exception), "network exploded")
         self.assertEqual(len(created), 1)
+
+    def test_groq_endpoint_requires_api_key(self):
+        client = TestClient(server.app)
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": ""}):
+            response = client.post("/groq/concise-answer", json={"prompt": "What is ISL?"})
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("GROQ_API_KEY", response.json()["detail"])
+
+    def test_local_env_file_sets_missing_values_without_overwriting(self):
+        env_file = self.download_path / ".env"
+        env_file.write_text(
+            "GROQ_API_KEY=file-key\nEXISTING_VALUE=file-value\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"EXISTING_VALUE": "shell-value"}, clear=True):
+            server.load_local_env_file(env_file)
+
+            self.assertEqual(os.environ["GROQ_API_KEY"], "file-key")
+            self.assertEqual(os.environ["EXISTING_VALUE"], "shell-value")
+
+    def test_groq_endpoint_rejects_empty_prompt(self):
+        client = TestClient(server.app)
+
+        response = client.post("/groq/concise-answer", json={"prompt": "   "})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("required", response.json()["detail"])
+
+    def test_groq_endpoint_returns_normalized_short_answer(self):
+        client = TestClient(server.app)
+        groq_payload = (
+            b'{"choices":[{"message":{"content":"- Indian Sign Language helps people communicate clearly with visual gestures every day."}}]}'
+        )
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), patch(
+            "server.urlopen",
+            return_value=FakeGroqResponse(groq_payload),
+        ) as urlopen_mock:
+            response = client.post("/groq/concise-answer", json={"prompt": "What is ISL?"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"answer": "Indian Sign Language helps people communicate clearly with visual gestures every day."},
+        )
+        request = urlopen_mock.call_args.args[0]
+        self.assertEqual(request.headers["Authorization"], "Bearer test-key")
+        self.assertEqual(request.headers["User-agent"], "ISL-Translation-Studio/1.0")
+
+    def test_groq_endpoint_returns_safe_error_on_failure(self):
+        client = TestClient(server.app)
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), patch(
+            "server.urlopen",
+            side_effect=URLError("network exploded"),
+        ):
+            response = client.post("/groq/concise-answer", json={"prompt": "What is ISL?"})
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "Groq could not generate an answer right now.")
+
+    def test_groq_endpoint_returns_key_guidance_on_forbidden(self):
+        client = TestClient(server.app)
+        forbidden_error = HTTPError(
+            url=server.GROQ_CHAT_COMPLETIONS_URL,
+            code=403,
+            msg="Forbidden",
+            hdrs={},
+            fp=BytesIO(b'{"error":{"message":"Forbidden"}}'),
+        )
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}), patch(
+            "server.urlopen",
+            side_effect=forbidden_error,
+        ):
+            response = client.post("/groq/concise-answer", json={"prompt": "What is ISL?"})
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.json()["detail"],
+            "Groq rejected the API key or project permissions. Check the key in backend/.env.",
+        )
 
     def test_speech_socket_session_lifecycle(self):
         client = TestClient(server.app)
