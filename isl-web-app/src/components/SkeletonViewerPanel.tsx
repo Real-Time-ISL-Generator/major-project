@@ -143,9 +143,10 @@ export function SkeletonViewerPanel({
 
   const visibleError = error ?? viewerError;
   const activeChunk = chunks[activeIndex] ?? null;
+  const isCaptionMode = activeChunk?.sourceMode === 'groq';
   const statusOverlay = getStatusOverlay(playbackState);
   const showLoading = !viewerReady || statusOverlay !== null;
-  const isVideoBacked = allowTranscriptToggle || liveMode;
+  const isVideoBacked = activeChunk?.sourceMode === 'youtube' || liveMode;
   const showChunkToggle = allowTranscriptToggle && chunks.length > 0;
   const showChunkBubble = Boolean(
     allowTranscriptToggle && isTranscriptOpen && activeChunk?.text.trim()
@@ -181,7 +182,13 @@ export function SkeletonViewerPanel({
               }
               onClick={() => setIsTranscriptOpen(prev => !prev)}
             >
-              {isTranscriptOpen ? 'Hide chunks' : 'Show chunks'}
+              {isTranscriptOpen
+                ? isCaptionMode
+                  ? 'Hide caption'
+                  : 'Hide chunks'
+                : isCaptionMode
+                  ? 'Show caption'
+                  : 'Show chunks'}
             </button>
           ) : null}
 
@@ -236,8 +243,14 @@ export function SkeletonViewerPanel({
           ) : null}
 
           {showChunkBubble ? (
-            <article className="viewer-chunk-bubble" aria-live="polite" aria-label="Current chunk text">
-              <span className="viewer-chunk-eyebrow">{`Chunk ${activeIndex + 1}`}</span>
+            <article
+              className="viewer-chunk-bubble"
+              aria-live="polite"
+              aria-label={isCaptionMode ? 'LLM answer caption' : 'Current chunk text'}
+            >
+              <span className="viewer-chunk-eyebrow">
+                {isCaptionMode ? 'Answer' : `Chunk ${activeIndex + 1}`}
+              </span>
               <p>{activeChunk?.text}</p>
             </article>
           ) : null}

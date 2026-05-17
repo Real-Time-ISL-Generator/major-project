@@ -8,6 +8,7 @@ import {
 } from './components/VideoModePanel';
 import {buildBackendUrl} from './lib/backend';
 import {
+  createGroqPlaybackChunks,
   createLivePlaybackChunk,
   createPlaybackChunks,
   createTextPlaybackChunks,
@@ -20,6 +21,7 @@ type SubmissionPayload = {
   text: string;
   videoUrl: string;
   fileContent: string;
+  llmPrompt: string;
 };
 
 type SegmentProgress = {
@@ -350,7 +352,7 @@ function App() {
     transitionToChunk(0);
   }
 
-  async function handleSubmit({text, videoUrl, fileContent}: SubmissionPayload) {
+  async function handleSubmit({text, videoUrl, fileContent, llmPrompt}: SubmissionPayload) {
     resetSession('loadingSource');
 
     const sessionId = submissionRef.current;
@@ -436,7 +438,41 @@ function App() {
         return;
       }
 
-      throw new Error('Add some text, subtitle content, or a YouTube link first.');
+      if (llmPrompt) {
+        const res = await fetch(buildBackendUrl('/groq/concise-answer'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({prompt: llmPrompt}),
+        });
+
+        if (sessionId !== submissionRef.current) {
+          return;
+        }
+
+        if (!res.ok) {
+          throw new Error(
+            await getResponseErrorMessage(
+              res,
+              'Backend request failed while asking Groq.'
+            )
+          );
+        }
+
+        const data = await res.json();
+        const answer = typeof data?.answer === 'string' ? data.answer.trim() : '';
+        const playbackChunks = createGroqPlaybackChunks(answer);
+
+        if (playbackChunks.length === 0) {
+          throw new Error('Groq returned an empty answer.');
+        }
+
+        initializePlayback(playbackChunks, null);
+        return;
+      }
+
+      throw new Error('Add some text, subtitle content, a Groq prompt, or a YouTube link first.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not process the input.';
       setPlaybackState('error');
@@ -823,7 +859,7 @@ function App() {
 
         <SkeletonViewerPanel
           activeIndex={activeIndex}
-          allowTranscriptToggle={Boolean(videoId)}
+          allowTranscriptToggle={Boolean(videoId) || activeMode === 'groq'}
           chunks={chunks}
           error={appError}
           liveMode={activeMode === 'video'}

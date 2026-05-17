@@ -77,6 +77,7 @@ describe('App', () => {
     expect(screen.queryByPlaceholderText(/enter text for translation/i)).not.toBeInTheDocument();
     expect(screen.getByRole('tab', {name: /youtube url/i})).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tab', {name: /text/i})).toBeInTheDocument();
+    expect(screen.getByRole('tab', {name: /llm mode/i})).toBeInTheDocument();
     expect(screen.getByRole('tab', {name: /subtitle file/i})).toBeInTheDocument();
     expect(screen.getByRole('tab', {name: /video mode/i})).toBeInTheDocument();
     expect(screen.getByRole('button', {name: /submit/i})).toBeInTheDocument();
@@ -122,6 +123,67 @@ describe('App', () => {
     expect(screen.queryByLabelText(/video preview panel/i)).not.toBeInTheDocument();
     expect(screen.getByText('Avatar Preview')).toBeInTheDocument();
     expect(screen.queryByRole('button', {name: /show chunks/i})).not.toBeInTheDocument();
+  });
+
+  it('asks Groq for a concise answer and routes it into the skeleton viewer', async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes('/groq/concise-answer')) {
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual({prompt: 'Why learn sign language?'});
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            answer: 'Sign language connects people through clear visual communication.',
+          }),
+        } as Response);
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch url: ${url}`));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    await user.click(screen.getByRole('tab', {name: /llm mode/i}));
+    expect(screen.getByLabelText(/groq prompt/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/ask groq for a short answer/i)).toHaveAttribute('type', 'text');
+
+    await user.type(screen.getByPlaceholderText(/ask groq for a short answer/i), 'Why learn sign language?');
+    await user.click(screen.getByRole('button', {name: /submit/i}));
+
+    await waitFor(() => {
+      const poseViewers = Array.from(document.querySelectorAll('pose-viewer'));
+      expect(poseViewers).toHaveLength(1);
+      expect(poseViewers[0]?.getAttribute('src')).toContain(
+        'text=Sign+language+connects+people+through+clear+visual+communication.'
+      );
+    });
+
+    expect(screen.getByRole('button', {name: /show caption/i})).toBeInTheDocument();
+    expect(screen.queryByLabelText(/llm answer caption/i)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', {name: /show caption/i}));
+    expect(screen.getByRole('button', {name: /hide caption/i})).toBeInTheDocument();
+    expect(screen.getByLabelText(/llm answer caption/i)).toHaveTextContent(
+      'Sign language connects people through clear visual communication.'
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText(/video preview panel/i)).not.toBeInTheDocument();
+  });
+
+  it('requires content before submitting an empty Groq prompt', async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole('tab', {name: /llm mode/i}));
+    await user.click(screen.getByRole('button', {name: /submit/i}));
+
+    expect(window.alert).toHaveBeenCalledWith('Add content to the active input mode before submitting.');
   });
 
   it('starts a live video session and routes finalized speech into the signer queue', async () => {

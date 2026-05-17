@@ -1,0 +1,289 @@
+9. MODULE IMPLEMENTATION
+
+This chapter presents the principal implementation features of the system in a concise but meaningful manner. Instead of reproducing large sections of source code, the discussion focuses on the most important parts of the application that directly contribute to user interaction, subtitle handling, playback preparation, and synchronized visual output. The intention here is to explain how the project has been designed and how its major parts work together in practice, while keeping the discussion suitable for an academic report.
+
+9.1 Input Handling and User Interaction
+The starting point of the application is the user input layer, because every later stage depends on the quality and clarity of what is submitted at this stage. The interface has been designed to support three separate modes of interaction: YouTube URL input, direct text input, and subtitle file upload. This separation is important because each type of input requires a different processing path. A YouTube link leads to subtitle retrieval from the backend, direct text is converted immediately into a playback-ready sequence, and a subtitle file is parsed locally after being selected by the user. By separating these modes rather than combining them in a single uncontrolled form, the system reduces ambiguity and creates a smoother user experience.
+
+Another important design decision in this part of the project is that only one mode is active at any given time. This prevents conflicting input combinations and ensures that the user always knows what the system is going to process. When the submit action is triggered, the panel prepares a clean payload based only on the selected mode. This may seem simple, but it is essential to the stability of the overall application because it avoids accidental mixing of typed text, file content, and video links. The same interface also controls loading state so that repeated clicks do not interrupt the current operation. In addition, the panel includes a clear action that resets the entered values and restores the input area to a neutral state. Theme selection is also preserved so that the interface remains consistent across sessions and improves comfort during repeated use.
+
+The following excerpt captures the input-branching logic in a compact form. It shows how the active mode determines the exact submission structure that is passed into the rest of the application.
+
+Snippet:
+```ts
+const nextSubmission =
+  activeMode === 'text'
+    ? {text: text.trim(), videoUrl: '', fileContent: ''}
+    : activeMode === 'file'
+      ? {text: '', videoUrl: '', fileContent}
+      : {text: '', videoUrl: videoUrl.trim(), fileContent: ''};
+```
+This small section is significant because it reflects a broader design principle used throughout the project: each user action is converted into a well-defined internal representation before further processing begins.
+Code Reference: isl-web-app/src/components/TextInputPanel.tsx | 81 | 98
+Code Reference: isl-web-app/src/components/TextInputPanel.tsx | 100 | 115
+Code Reference: isl-web-app/src/components/TextInputPanel.tsx | 127 | 141
+Code Reference: isl-web-app/src/components/TextInputPanel.tsx | 32 | 48
+
+9.2 Subtitle Retrieval and Backend API
+Once a YouTube link is submitted, the responsibility shifts from the input layer to the backend application. This part of the project is responsible for identifying the requested video, retrieving subtitle data, and returning the required information in a form that the frontend can use immediately. The backend provides a health endpoint for availability checks and a dedicated download endpoint for subtitle acquisition. This separation keeps the external interaction simple from the frontend's point of view while allowing the backend to manage the more detailed processing logic internally.
+
+The retrieval process begins with extraction of the video identifier from the submitted link. Since YouTube links may appear in different formats, the backend includes logic to interpret more than one URL style before deciding which video is being requested. Once the identifier is determined, the backend prepares the configuration needed to obtain English subtitle output in SRT format. The resulting subtitle file is stored under a unique name so that multiple requests can be handled cleanly without collisions. After this stage, the backend returns the information necessary for the frontend to continue with parsing and playback.
+
+This section of the project also includes an important reliability feature. In practical use, subtitle retrieval may not always succeed on the first attempt, especially when additional confirmation is required. To reduce disruption in such cases, the backend contains a retry mechanism that can make a second attempt with cookie-backed authentication data. This improves robustness without forcing the user to change the way they interact with the system. In effect, the backend not only retrieves subtitles but also protects the overall user experience by handling difficult access cases in the background.
+
+The following code fragment reflects the core download configuration used during subtitle retrieval.
+
+Snippet:
+```python
+ydl_opts = {
+    "outtmpl": str(DOWNLOAD_PATH / f"{unique_id}.%(ext)s"),
+    "skip_download": True,
+    "writesubtitles": True,
+    "writeautomaticsub": True,
+    "subtitleslangs": ["en"],
+    "subtitlesformat": "srt",
+}
+```
+This excerpt is brief, but it reveals the essential intent of the backend: obtain subtitle content efficiently, avoid unnecessary media download, and keep the output aligned with the processing needs of the frontend.
+Code Reference: backend/server.py | 127 | 135
+Code Reference: backend/server.py | 39 | 55
+Code Reference: backend/server.py | 175 | 224
+Code Reference: backend/server.py | 227 | 229
+Code Reference: backend/server.py | 232 | 250
+
+9.3 Subtitle Parsing and Semantic Chunk Formation
+Raw subtitle text is rarely ready for direct visual playback. It often contains formatting noise, timing irregularities, overlapping windows, and fragments that are too short or too closely spaced to be useful in isolation. For this reason, the project includes a dedicated parsing and chunk-formation stage. This stage acts as the bridge between subtitle acquisition and meaningful playback. Its purpose is not simply to read subtitle lines, but to convert them into a sequence of well-structured units that can support smooth and understandable visual presentation.
+
+The parser first standardizes the incoming content. It handles both SRT and VTT formats, removes headers and note sections, normalizes line endings, extracts timestamps, and cleans unnecessary formatting marks from the text. After this initial pass, the parsed cues are checked for invalid or overlapping timing patterns. If overlapping cues would create duplication in the playback timeline, the system resolves them so that the final sequence remains clean and coherent. This is especially important in subtitle streams where rolling captions or repeated windows may otherwise lead to confusing output.
+
+Once the cues have been normalized, the system moves into semantic chunk formation. Here, the goal is to combine nearby subtitle cues into larger units that feel more natural during playback. Instead of treating every subtitle line as a separate display event, the implementation examines character length, time gap, and overall duration before deciding whether adjacent cues should stay together or be split apart. The current thresholds are specific and deliberate: maxChars = 96, maxDuration = 7.5 seconds, and maxGap = 0.85 seconds. These values help prevent both extremes: overly fragmented playback and excessively long segments that become difficult to follow.
+
+The following excerpt highlights the key decision logic used during chunk formation.
+
+Snippet:
+```ts
+if (gap > options.maxGap) {
+  return true;
+}
+if (combinedText.length > options.maxChars) {
+  return true;
+}
+if (combinedDuration > options.maxDuration) {
+  return true;
+}
+```
+This short rule set is a good example of how the project balances readability and timing. Instead of relying on a single condition, it considers textual density, temporal distance, and duration together before deciding where a meaningful boundary should appear.
+Code Reference: isl-web-app/src/lib/subtitleParser.ts | 56 | 100
+Code Reference: isl-web-app/src/lib/subtitleParser.ts | 103 | 133
+Code Reference: isl-web-app/src/lib/subtitleParser.ts | 136 | 157
+Code Reference: isl-web-app/src/lib/subtitleParser.ts | 170 | 204
+
+9.4 Playback Preparation, Pose Generation, and Viewer Rendering
+After chunk formation is complete, the application prepares each chunk for actual playback. At this stage, the text is no longer treated as raw subtitle content but as a structured playback unit with timing, identity, and display-related state. Each prepared chunk includes the text to be presented, its start and end time, an estimated or derived duration, and the information required to request the corresponding visual sequence. This intermediate representation is one of the most important parts of the system because it allows the later stages to operate consistently, regardless of whether the original source was a YouTube link, typed text, or an uploaded subtitle file.
+
+Pose generation is handled through a compact utility that converts the chunk text and language parameters into a request string used by the visual playback layer. Even though the implementation itself is short, its role is central because it connects language content with avatar-ready output. The current implementation uses the language parameters spoken = en and signed = ase. Once this request string is prepared, the viewer layer takes over and becomes responsible for rendering the current chunk on screen.
+
+The rendering layer is designed to do more than simply display animation output. It manages component initialization, responds to lifecycle events, and communicates playback status back to the rest of the application. It also provides visual feedback to the user by showing loading indicators, active playback states, chunk text bubbles, and error overlays. This makes the viewer not just a display surface, but an active part of the overall user experience.
+
+The following snippet shows the compact request-building step that prepares the pose sequence query.
+
+Snippet:
+```ts
+const params = new URLSearchParams({
+  text: trimmedText,
+  spoken: spokenLanguage,
+  signed: signedLanguage,
+});
+return `${api}?${params.toString()}`;
+```
+Although brief, this code is important because it marks the point where processed language content becomes directly usable by the rendering pipeline.
+Code Reference: isl-web-app/src/lib/playback.ts | 17 | 27
+Code Reference: isl-web-app/src/lib/playback.ts | 33 | 45
+Code Reference: isl-web-app/src/lib/translation.ts | 11 | 17
+Code Reference: isl-web-app/src/lib/poseViewer.ts | 3 | 18
+Code Reference: isl-web-app/src/components/SkeletonViewerPanel.tsx | 98 | 129
+Code Reference: isl-web-app/src/components/SkeletonViewerPanel.tsx | 132 | 228
+
+9.5 Playback Synchronization and End-to-End Execution Flow
+The final stage of implementation is the orchestration layer, where all previous parts are connected into one continuous process. This logic is handled by the main application component, which acts as the controller for runtime behavior. It receives the submission, resets the previous session state when necessary, coordinates subtitle retrieval or local processing, initializes the playback chunks, and then advances through those chunks in the correct order. The value of this stage lies not in any single function, but in the way it keeps every part of the project synchronized.
+
+When the input comes from a YouTube link, the controller first retrieves subtitle data from the backend and then passes the content through parsing and chunk formation. When the input comes from text or a subtitle file, the controller takes a shorter route but still produces the same internal playback representation. In that sense, different user inputs are unified into one internal execution model. This is a strong design feature because it reduces duplication and allows the same playback logic to operate across all supported modes.
+
+Synchronization becomes especially important during playback. For video-backed execution, the system seeks the source player to the correct segment boundary, starts the corresponding visual output, watches the segment timing, and pauses at the correct moment to avoid overlap with the next chunk. When no source video is involved, a virtual timing mechanism performs the same coordination role. Only after both sides of the playback process are complete does the system move on to the next chunk. This ensures that the visual sequence and timing remain aligned instead of drifting apart over successive segments.
+
+The following short excerpt captures the central synchronization step used during video-backed playback.
+
+Snippet:
+```ts
+player.seekTo(currentChunk.start, true);
+player.playVideo();
+monitorVideoSegment(currentChunk.start, currentChunk.end);
+return;
+```
+This part of the controller illustrates how playback is not merely started, but actively guided within defined temporal boundaries. In complete form, the overall execution path of the system can be summarized as follows: User input -> input validation -> subtitle retrieval or local content reading -> subtitle parsing -> normalization -> semantic chunk formation -> playback chunk preparation -> pose request generation -> viewer binding -> synchronized playback -> chunk transition -> completion.
+Code Reference: isl-web-app/src/App.tsx | 280 | 365
+Code Reference: isl-web-app/src/App.tsx | 479 | 509
+Code Reference: isl-web-app/src/App.tsx | 515 | 524
+Code Reference: isl-web-app/src/App.tsx | 526 | 575
+
+
+10. TESTING
+
+10.1 Testing Overview
+Testing was treated as a practical part of development rather than a separate theoretical exercise. The aim was to check whether the implemented features behave correctly under realistic conditions, especially in the parts of the application where multiple stages interact with one another. For that reason, the draft includes frontend tests for user-facing behavior, parser tests for subtitle handling, backend tests for retrieval and retry conditions, and build verification to ensure that the application can be compiled successfully for production use.
+
+The testing approach used in this project covers both isolated logic and complete interaction paths. Some tests focus on utility functions such as subtitle parsing and URL construction, while others examine broader interface behavior such as mode switching, text submission, playback progression, and synchronized video handling. This combination is useful because it does not treat the application as a set of disconnected pieces. Instead, it checks the project in the same layered manner in which it was designed.
+Code Reference: isl-web-app/src/App.test.tsx | 1 | 351
+Code Reference: isl-web-app/src/lib/subtitleParser.test.ts | 1 | 121
+Code Reference: isl-web-app/src/lib/translation.test.ts | 1 | 10
+Code Reference: backend/test_server.py | 1 | 174
+
+10.2 Frontend Functional Test Cases
+The frontend test set is closely aligned with the main user journeys supported by the application. It begins with the default interface state, ensuring that the expected controls, tabs, and display regions appear correctly when the application first loads. This is important because the project depends heavily on clear user interaction, and even a small interface inconsistency can affect the entire processing sequence that follows.
+
+The tests then move into active interaction scenarios. Theme switching is checked to confirm that the interface responds correctly to user customization. Text mode is tested to make sure a manually entered sentence is converted into a single playback sequence without incorrectly showing the video panel. The video-backed path is examined more carefully because it involves several connected actions: subtitle retrieval, parsing, chunk preparation, viewer updates, and timed movement from one chunk to the next. A separate timing-focused test ensures that a very short subtitle segment is paused correctly before playback spills into the next segment. There is also an important test for mode isolation, which confirms that the system submits only the currently active input mode even if other fields contain draft content. Taken together, these tests give confidence that the frontend behaves consistently in both ordinary and timing-sensitive situations.
+Code Reference: isl-web-app/src/App.test.tsx | 73 | 350
+
+10.3 Subtitle Parser and Utility Test Cases
+The subtitle parser and related utility logic are tested because they form the foundation of the playback pipeline. If subtitle content is interpreted incorrectly at this stage, the error would propagate through every later part of the system. The parser tests therefore focus on correctness under multiple subtitle conditions. Standard SRT input is checked to ensure that timestamps and text are extracted as expected. VTT input is also tested so that the parser can be trusted across more than one subtitle format. Formatting tags and extra markup are deliberately included in the test cases to confirm that they are removed before the content reaches the playback layer.
+
+Additional parser tests examine overlap handling and semantic merging. These are important because subtitle streams often contain repeated or overlapping windows, especially in automatically generated caption sources. The tests confirm that overlapping cues are trimmed correctly and that nearby cues can be merged into larger, more natural playback segments. Alongside this, the pose request utility is tested to ensure that the generated request string is assembled correctly from the input text and language parameters. These checks strengthen the project at a deeper level by validating the data transformations that sit between raw subtitle content and visible output.
+Code Reference: isl-web-app/src/lib/subtitleParser.test.ts | 4 | 121
+Code Reference: isl-web-app/src/lib/translation.test.ts | 4 | 9
+
+10.4 Backend Unit Test Cases
+The backend tests focus on the reliability of subtitle acquisition and retry behavior. This is a particularly important part of the project because the entire video-backed path depends on obtaining subtitle data correctly before any later processing can begin. The unit tests therefore check the normal success case as well as a series of less straightforward conditions. These include correct response structure after subtitle creation, correct video identifier resolution when the returned data contains playlist-style entries, and the activation of retry logic when authentication-related errors appear during the first attempt.
+
+The backend tests also examine priority and fallback behavior in greater detail. They verify that a configured cookie file is considered before browser-based candidates, that explicitly specified browser settings influence candidate order, and that certain browser-source failures can be skipped so the next retry option can still be used. In addition, the tests confirm that the system returns a 404 error if subtitle generation does not produce a usable subtitle file and that unrelated failures do not trigger unnecessary retry cycles. This part of the testing chapter is valuable because it demonstrates that the backend logic has been examined not only under normal use, but also under conditions where access and retrieval may become less predictable.
+Code Reference: backend/test_server.py | 41 | 170
+
+10.5 Build Verification
+In addition to the test files themselves, the application was also checked through direct command execution in the current environment. The frontend test command completed successfully, with all 12 out of 12 tests passing on April 15, 2026. The frontend build command also completed successfully, confirming that the application can be compiled into a production-ready build without unresolved type or bundling failures.
+
+At the same time, it is important to describe the backend verification status accurately. The backend test file is present and contains meaningful unit tests, but those tests could not be executed in the current environment because the local Python interpreter did not have the `fastapi` package installed. As a result, the test module import failed before the backend test cases themselves could run. This distinction matters in the report: the absence of backend execution in this environment does not indicate a confirmed application defect, but rather an environment dependency that must be installed before those tests can be executed locally.
+Code Reference: isl-web-app/src/App.test.tsx | 73 | 350
+Code Reference: isl-web-app/src/lib/subtitleParser.test.ts | 4 | 121
+Code Reference: isl-web-app/src/lib/translation.test.ts | 4 | 9
+Code Reference: backend/test_server.py | 1 | 174
+
+10.6 Testing Summary
+Overall, the testing evidence supports the stability of the major features implemented in the project. The frontend checks demonstrate that the user-facing paths behave as intended, including mode selection, text submission, video-linked playback, and timing-sensitive transitions. The parser and utility tests strengthen confidence in the internal data transformations that prepare subtitle content for playback. The backend tests, although not executed in the current environment, are still important because they show that retrieval and retry logic have been deliberately exercised in code.
+
+From a report-writing perspective, the value of this testing chapter lies in the fact that it remains tied to the actual application rather than drifting into generic software engineering theory. The tests are not described for the sake of naming testing techniques; they are described because they directly validate the working behavior of this project.
+Code Reference: isl-web-app/src/App.test.tsx | 73 | 350
+Code Reference: isl-web-app/src/lib/subtitleParser.test.ts | 4 | 121
+Code Reference: backend/test_server.py | 41 | 170
+
+
+11. SCREENSHOTS
+
+11.1 Home Screen with YouTube Input Mode
+Purpose of screen:
+This screenshot should introduce the application in its default state. It is meant to give the reader a first impression of the working environment before any processing begins.
+
+Input/action performed:
+Launch the application and keep the default tab unchanged, without entering any value or submitting any request.
+
+Observed system behavior:
+The screen displays the YouTube URL input field together with the action controls and the avatar preview area. Since no content has been submitted yet, the video panel remains absent and the viewer appears in its initial empty state.
+
+What this proves about implementation:
+This screenshot establishes that the application opens in a clean and organized default mode, with the expected controls available and the output area ready for later interaction. It also demonstrates that the interface is structured from the beginning to support the subtitle-driven workflow.
+Code Reference: isl-web-app/src/components/TextInputPanel.tsx | 143 | 262
+Code Reference: isl-web-app/src/components/SkeletonViewerPanel.tsx | 142 | 170
+
+11.2 Manual Text Translation Screen
+Purpose of screen:
+This screenshot is intended to show that the application is not limited to video-based input and can also operate directly on manually entered text.
+
+Input/action performed:
+Select the Text tab, enter a short sample sentence such as "Hello world", and submit the input.
+
+Observed system behavior:
+The application keeps the interface focused on the avatar area, without displaying the video panel. The submitted text is converted into a single playback unit, and the viewer begins presenting the corresponding output.
+
+What this proves about implementation:
+This screenshot shows that the project supports a direct text-to-playback path and that the internal processing pipeline can function even when no subtitle file or YouTube source is involved. It highlights the flexibility of the input design and the reuse of a common playback model.
+Code Reference: isl-web-app/src/components/TextInputPanel.tsx | 264 | 313
+Code Reference: isl-web-app/src/App.tsx | 354 | 362
+
+11.3 Subtitle File Upload Screen
+Purpose of screen:
+This screenshot should document the file-based input path, which is useful when subtitle content is already available locally.
+
+Input/action performed:
+Open the Subtitle File tab and select an `.srt` or `.vtt` file from the local system.
+
+Observed system behavior:
+The selected file name is displayed in the interface, and the submission controls remain available so that the uploaded subtitle content can proceed to parsing and playback preparation.
+
+What this proves about implementation:
+This screenshot demonstrates that the application can accept subtitle content directly from a local file and integrate it into the same processing flow used by the other input modes. It also shows that the project is not dependent on a single source of input data.
+Code Reference: isl-web-app/src/components/TextInputPanel.tsx | 315 | 368
+Code Reference: isl-web-app/src/App.tsx | 340 | 350
+
+11.4 YouTube Video and Avatar Playback Screen
+Purpose of screen:
+This screenshot should represent the main demonstration state of the project, where the source video and the visual playback output are shown together.
+
+Input/action performed:
+Enter a valid YouTube URL, submit it, and wait until subtitle retrieval and playback preparation are completed.
+
+Observed system behavior:
+The interface displays the source video panel alongside the avatar preview. The system begins processing the subtitle content into chunks, and the output proceeds in a time-aligned manner that corresponds to the source video.
+
+What this proves about implementation:
+This screenshot provides evidence that the complete integrated path is functioning: subtitle retrieval, subtitle processing, playback preparation, and synchronized visual presentation are all working together within the same interface.
+Code Reference: isl-web-app/src/App.tsx | 285 | 336
+Code Reference: isl-web-app/src/App.tsx | 595 | 630
+
+11.5 Chunk Display / Transcript Bubble Screen
+Purpose of screen:
+This screenshot should highlight the feature that reveals the currently active chunk during video-backed playback.
+
+Input/action performed:
+While a YouTube-linked playback sequence is running, click the Show chunks button in the viewer panel.
+
+Observed system behavior:
+The interface opens a chunk bubble that displays the current segment number and the text associated with that part of the playback.
+
+What this proves about implementation:
+This screenshot shows that the system is not only rendering output but also maintaining awareness of the current textual segment. It helps demonstrate that the application keeps track of chunk progression in a user-visible and understandable way.
+Code Reference: isl-web-app/src/components/SkeletonViewerPanel.tsx | 153 | 222
+
+11.6 Theme Toggle or Error Display Screen
+Purpose of screen:
+This screenshot is intended to show an additional interaction feature that supports usability or resilience in the interface.
+
+Input/action performed:
+Either open the workspace menu and toggle the theme, or capture a case in which the interface displays an error message during processing or rendering.
+
+Observed system behavior:
+In the theme case, the interface changes appearance and retains the chosen visual preference. In the error case, the viewer area presents a visible message indicating that a problem occurred during processing.
+
+What this proves about implementation:
+This screenshot demonstrates that the project includes supporting features beyond the primary playback path. It shows attention to usability, user control, and feedback during abnormal conditions, all of which are important in a complete application.
+Code Reference: isl-web-app/src/components/TextInputPanel.tsx | 32 | 48
+Code Reference: isl-web-app/src/components/TextInputPanel.tsx | 173 | 206
+Code Reference: isl-web-app/src/components/SkeletonViewerPanel.tsx | 224 | 228
+
+
+12. CONCLUSION AND FUTURE WORK
+
+12.1 Conclusion
+This project has been developed to make spoken or written content easier to follow through a sign-oriented visual presentation workflow. The system accepts three types of input, namely YouTube video links, plain text, and subtitle files, and transforms them into a common internal processing sequence. This sequence includes input validation, subtitle retrieval when required, subtitle parsing, semantic chunk preparation, playback coordination, and synchronized visual rendering. Because these stages are connected through a shared internal structure, the project is able to support more than one type of input without needing entirely separate execution paths for each case.
+
+One of the strongest aspects of the implementation is the way subtitle content is refined before playback begins. Rather than passing raw subtitle text directly into the display layer, the project first restructures the subtitle stream into clean and meaningful playback units. Parsing, normalization, overlap handling, and chunk formation all contribute to this process. As a result, the final playback sequence is more stable, easier to follow, and better suited to timed visual presentation. This is particularly important in real subtitle data, where timing overlaps, formatting inconsistencies, and short fragmented cues can easily reduce clarity if they are not handled carefully.
+
+The project also demonstrates a practical balance between interface design and internal processing logic. The frontend provides multiple ways for the user to interact with the application while still preserving a single coherent execution model. The backend supports the YouTube-based path by retrieving subtitle data and handling retry situations when the first attempt is not sufficient. The playback controller then brings these pieces together and ensures that each chunk is prepared and executed in sequence. From the standpoint of an academic project, this integration is important because it shows that the work is not limited to isolated functions or interface mock-ups; it results in a working system where several engineered components operate together in a meaningful way.
+
+The testing evidence further strengthens the usefulness of the project. Frontend interaction tests, parser tests, and build verification provide direct support for the claim that the implemented features behave as intended. Even where environment limitations prevented backend tests from being executed locally, the presence of dedicated backend unit tests shows that reliability and edge-case handling were considered during development. Taken together, the project can be concluded as a well-structured and functionally meaningful implementation that addresses the problem of subtitle-driven visual interpretation through a coordinated, multi-stage software pipeline.
+
+12.2 Future Work
+Although the current version of the project is functionally complete in its main objectives, there are several directions in which it can be improved further. One major area for future work is the refinement of language and sign alignment. At present, the system is already capable of transforming input content into a visual playback sequence, but future development can improve how strongly the language-processing stage aligns with the specific sign-language goals of the project. This would be especially valuable if the work is extended toward broader linguistic coverage, deeper sign-language adaptation, or more specialized educational and assistive use cases.
+
+Another useful direction is performance and scalability improvement. As the application grows, there is value in reducing processing overhead, improving loading efficiency, and refining playback smoothness in longer sessions. The current implementation already supports structured chunk-based playback, which provides a strong foundation for such optimization. Future work could therefore focus on better bundling strategy, finer playback tuning, and more efficient handling of large subtitle inputs. These changes would improve responsiveness without altering the core design of the system.
+
+The project can also be extended with stronger persistence and analysis features. At present, the application focuses on immediate processing and playback. A future version could store user sessions, processed inputs, subtitle histories, or playback-related information for later review. This would be especially useful in an educational setting, a repeated demonstration context, or a research workflow where prior results need to be revisited. In the same way, broader evaluation methods such as usability studies, timing accuracy analysis, and comprehension-focused feedback could add stronger evidence for the practical effectiveness of the system.
+
+Finally, future work may also concentrate on deployment maturity and long-term maintainability. This includes richer integration testing, improved environment preparation, more systematic error reporting, and cleaner support for wider usage conditions. These additions would not change the central idea of the project, but they would help move it from a strong prototype toward a more polished and dependable application. In that sense, the current implementation forms a solid base on which a more comprehensive and mature version of the project can be built.
